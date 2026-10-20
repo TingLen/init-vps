@@ -34,7 +34,10 @@ bash init-vps.sh
 
 ## 主要配置
 
-- 安装基础工具、Helix、Docker 和 Fish。
+- 安装基础工具、Helix、Docker、Fish，以及 bat、glow、zoxide。
+- `bat` 用于高亮查看文件（自动兼容 Debian 的 `batcat`）；`glow` 用于终端阅读 Markdown。
+- Fish 自动初始化 zoxide，重新登录后可使用 `z 目录名` 跳转；这里的 `z` 指 zoxide 提供的命令。
+- Glow 优先从系统源安装，无包时下载官方稳定版 deb（支持 amd64/arm64）。
 - 将目标用户默认登录 Shell 设为 Fish，下次登录生效。
 - 内嵌 xterm-ghostty 定义，缺少时自动安装。
 - UFW 默认拒绝入站、允许出站，不默认开放 80/443，保留已有规则。Docker 发布端口需单独核查。
