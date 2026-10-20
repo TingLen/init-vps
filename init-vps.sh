@@ -61,6 +61,7 @@ summary() {
         printf 'SSH 当前有效端口：\n'
         /usr/sbin/sshd -T | awk '$1 == "port" {print "  " $2 "/tcp"}'
         printf '默认 Shell：%s\n' "$(getent passwd "$TARGET_USER" | cut -d: -f1,7)"
+        printf '新增工具：bat / glow / zoxide（Fish 中使用 z；重新登录生效）\n'
         printf '终端：xterm-ghostty（由客户端传递 TERM）\n'
         printf '完整日志：%s\n摘要文件：%s/summary.txt\n' "$LOG_FILE" "$STATE"
         printf '防火墙：未默认开放 80/443；已有规则保留。\n'
@@ -93,9 +94,37 @@ fi
 
 step "1/6 安装基础软件包"
 apt-get -o DPkg::Lock::Timeout=120 update
-apt-get -o DPkg::Lock::Timeout=120 install -y ca-certificates wget curl ufw nano less iproute2 lsof unzip git python3 fish tmux dnsutils jq xz-utils ncurses-bin ncurses-term
+apt-get -o DPkg::Lock::Timeout=120 install -y ca-certificates wget curl ufw nano less iproute2 lsof unzip git python3 fish tmux dnsutils jq xz-utils ncurses-bin ncurses-term bat zoxide
 # 全量系统升级不默认执行，避免升级现有业务或触发配置文件交互。
 TMP_DIR=$(mktemp -d)
+
+# Debian 的 bat 包可能只提供 batcat，统一提供 bat 命令。
+if ! command -v bat >/dev/null; then
+    bat_path=$(command -v batcat) || fail 'bat 安装失败：未找到 bat 或 batcat。'
+    [[ ! -e /usr/local/bin/bat && ! -L /usr/local/bin/bat ]] || fail '/usr/local/bin/bat 已存在，拒绝覆盖。'
+    ln -s "$bat_path" /usr/local/bin/bat
+fi
+bat --version
+zoxide --version
+
+# Glow 在部分系统源中不可用，回退到官方稳定版 deb 包。
+if apt-cache policy glow | grep -Eq 'Candidate: [^ (]'; then
+    apt-get -o DPkg::Lock::Timeout=120 install -y glow
+elif ! command -v glow >/dev/null; then
+    glow_arch=$(dpkg --print-architecture)
+    case $glow_arch in
+        amd64|arm64) ;;
+        *) fail 'Glow 官方 deb 自动安装仅支持 amd64/arm64。' ;;
+    esac
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 120 \
+        https://api.github.com/repos/charmbracelet/glow/releases/latest -o "$TMP_DIR/glow.json"
+    glow_url=$(jq -er --arg suffix "_${glow_arch}.deb" \
+        '[.assets[] | select(.name | endswith($suffix)) | .browser_download_url] | if length == 1 then .[0] else error("Glow 发行资产不唯一或不存在") end' "$TMP_DIR/glow.json")
+    [[ $glow_url == https://github.com/charmbracelet/glow/releases/download/* ]] || fail 'Glow 下载地址异常。'
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$glow_url" -o "$TMP_DIR/glow.deb"
+    apt-get -o DPkg::Lock::Timeout=120 install -y "$TMP_DIR/glow.deb"
+fi
+glow --version
 
 step "2/6 安装 Helix"
 # 优先使用发行版提供的 Helix，否则使用官方最新稳定发行版。
@@ -235,6 +264,18 @@ usermod --shell "$fish_path" "$TARGET_USER"
 [[ $(getent passwd "$TARGET_USER" | cut -d: -f7) == "$fish_path" ]] || fail '默认 Shell 修改失败。'
 printf '已将 %s 默认 Shell 改为 %s，重新登录生效。\n' "$TARGET_USER" "$fish_path"
 fish --version
+# 为交互式 Fish 启用 zoxide，提供 z 目录跳转命令。
+install -d -m 755 /etc/fish/conf.d
+cat > "$TMP_DIR/90-init-vps-tools.fish" <<'FISH_TOOLS'
+# 初始化目录跳转工具；避免影响非交互式脚本。
+if status is-interactive
+    if command -q zoxide
+        zoxide init fish | source
+    end
+end
+FISH_TOOLS
+fish --no-config --no-execute "$TMP_DIR/90-init-vps-tools.fish"
+install -m 644 "$TMP_DIR/90-init-vps-tools.fish" /etc/fish/conf.d/90-init-vps-tools.fish
 
 step "5/6 配置防火墙并切换 SSH 端口"
 install -d -m 755 /etc/ssh/sshd_config.d
