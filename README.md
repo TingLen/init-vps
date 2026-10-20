@@ -7,10 +7,10 @@
 通过 SSH 登录 VPS 后，以 root 执行（支持 Bash 和 Fish）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TingLen/init-vps/main/init-vps.fish | bash
+curl -fsSL https://raw.githubusercontent.com/TingLen/init-vps/main/init-vps.sh | bash
 ```
 
-当前文件虽然以 `.fish` 命名，内容实际是 Bash，请使用上述命令执行。无需先运行 `init-fish.sh`，也不需要额外的终端定义文件。
+脚本使用 Bash 执行，已内嵌 Ghostty 终端定义，无需额外文件。
 
 若系统尚未安装 curl：
 
@@ -21,7 +21,7 @@ apt-get update && apt-get install -y ca-certificates curl
 也可以先下载查看，再执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TingLen/init-vps/main/init-vps.fish -o init-vps.sh
+curl -fsSL https://raw.githubusercontent.com/TingLen/init-vps/main/init-vps.sh -o init-vps.sh
 less init-vps.sh
 bash init-vps.sh
 ```
