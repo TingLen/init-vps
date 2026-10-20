@@ -47,6 +47,9 @@ STATE=/var/lib/init-vps
 # root 直接运行时修改 root；sudo 运行时优先修改发起 sudo 的用户。
 TARGET_USER=${TARGET_USER:-${SUDO_USER:-root}}
 getent passwd "$TARGET_USER" >/dev/null || fail "用户不存在：$TARGET_USER"
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+TARGET_GROUP=$(id -gn "$TARGET_USER")
+[[ $TARGET_HOME == /* && -d $TARGET_HOME ]] || fail '目标用户家目录不存在或不是绝对路径。'
 install -d -m 700 /var/log/init-vps "$STATE"
 LOG_FILE=$(mktemp "/var/log/init-vps/$(date +%Y%m%d-%H%M%S)-init.XXXXXX.log")
 chmod 600 "$LOG_FILE"
@@ -61,7 +64,9 @@ summary() {
         printf 'SSH 当前有效端口：\n'
         /usr/sbin/sshd -T | awk '$1 == "port" {print "  " $2 "/tcp"}'
         printf '默认 Shell：%s\n' "$(getent passwd "$TARGET_USER" | cut -d: -f1,7)"
-        printf '新增工具：bat / glow / zoxide（Fish 中使用 z；重新登录生效）\n'
+        printf '新增工具：Starship / bat / glow / zoxide（Fish 中使用 z；重新登录生效）\n'
+        printf '样式：Helix 浅色主题与真彩色；Starship 彩色提示符（SSH 显示主机名）。\n'
+        printf '同名用户配置备份：%s/config-backups/\n' "$STATE"
         printf '终端：xterm-ghostty（由客户端传递 TERM）\n'
         printf '完整日志：%s\n摘要文件：%s/summary.txt\n' "$LOG_FILE" "$STATE"
         printf '防火墙：未默认开放 80/443；已有规则保留。\n'
@@ -69,6 +74,25 @@ summary() {
         ufw status verbose
     } | tee "$STATE/summary.txt"
     chmod 600 "$STATE/summary.txt"
+}
+# 同名用户配置先备份，再安装；不覆盖 Fish 主配置和通用变量。
+install_user_config() {
+    local source=$1 relative=$2 destination="$TARGET_HOME/.config/$2"
+    if [[ -e $destination || -L $destination ]]; then
+        install -d -m 700 "$STATE/config-backups/$(dirname "$relative")"
+        cp -a -- "$destination" "$STATE/config-backups/$relative"
+    fi
+    local directory="$TARGET_HOME/.config" part
+    local -a parts
+    IFS=/ read -r -a parts <<< "$(dirname "$relative")"
+    [[ -d $directory ]] || install -d -m 755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$directory"
+    for part in "${parts[@]}"; do
+        directory="$directory/$part"
+        [[ -d $directory ]] || install -d -m 755 -o "$TARGET_USER" -g "$TARGET_GROUP" "$directory"
+    done
+    # 避免 install 跟随已有文件符号链接修改其他文件。
+    rm -f -- "$destination"
+    install -m 644 -o "$TARGET_USER" -g "$TARGET_GROUP" "$source" "$destination"
 }
 step "VPS 初始化 · SSH $SSH_PORT · 用户 $TARGET_USER"
 printf '日志文件：%s\n' "$LOG_FILE"
@@ -156,6 +180,57 @@ WRAPPER
 fi
 hx --version
 
+# 明确浅色主题与真彩色，避免 SSH 基础调色板导致行号对比不足。
+cat > "$TMP_DIR/helix-config.toml" <<'HELIX_CONFIG'
+theme = "iterm2_solarized_light"
+
+[editor]
+true-color = true
+HELIX_CONFIG
+cat > "$TMP_DIR/helix-theme.toml" <<'HELIX_THEME'
+
+# ~/.config/helix/themes/iterm2_solarized_light.toml
+inherits = "solarized_light"
+
+# 同步自 Ghostty: iTerm2 Solarized Light
+"ui.background" = { bg = "background" }
+"ui.text" = { fg = "foreground" }
+"ui.cursor.primary" = { fg = "cursor_text", bg = "cursor" }
+"ui.selection" = { fg = "selection_fg", bg = "selection_bg" }
+"ui.selection.primary" = { fg = "selection_fg", bg = "selection_bg" }
+
+[palette]
+red = "#dc322f"
+green = "#859900"
+yellow = "#b58900"
+blue = "#268bd2"
+magenta = "#d33682"
+cyan = "#2aa198"
+orange = "#cb4b16"
+violet = "#6c71c4"
+
+background = "#fdf6e3"
+foreground = "#657b83"
+cursor = "#657b83"
+cursor_text = "#eee8d5"
+selection_bg = "#eee8d5"
+selection_fg = "#586e75"
+
+base0 = "#657b83"
+base1 = "#586e75"
+base2 = "#073642"
+base3 = "#002b36"
+base00 = "#839496"
+base01 = "#93a1a1"
+base015 = "#c5c8bd"
+base0175 = "#dddbcc"
+base02 = "#eee8d5"
+base025 = "#f5eedb"
+base03 = "#fdf6e3"
+HELIX_THEME
+install_user_config "$TMP_DIR/helix-theme.toml" helix/themes/iterm2_solarized_light.toml
+install_user_config "$TMP_DIR/helix-config.toml" helix/config.toml
+
 step "3/6 安装并检查 Docker"
 # 已有 Docker 时保留；首次安装使用官方便利脚本，下载成功后再执行。
 if ! command -v docker >/dev/null; then
@@ -165,7 +240,336 @@ fi
 systemctl enable --now docker.service
 docker info >/dev/null
 
-step "4/6 配置 Fish 与 Ghostty"
+step "4/6 配置 Fish、Starship 与 Ghostty"
+
+# 已有 Starship 时复用；否则下载官方稳定版并核对发布摘要。
+if ! command -v starship >/dev/null; then
+    case $(uname -m) in
+        x86_64) starship_arch=x86_64 ;;
+        aarch64|arm64) starship_arch=aarch64 ;;
+        *) fail 'Starship 官方二进制安装仅支持 x86_64/aarch64。' ;;
+    esac
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 120 \
+        https://api.github.com/repos/starship/starship/releases/latest -o "$TMP_DIR/starship.json"
+    starship_asset="starship-$starship_arch-unknown-linux-musl.tar.gz"
+    starship_url=$(jq -er --arg name "$starship_asset" \
+        '[.assets[] | select(.name == $name)] | if length == 1 then .[0].browser_download_url else error("Starship 发行资产不唯一或不存在") end' "$TMP_DIR/starship.json")
+    starship_digest=$(jq -er --arg name "$starship_asset" \
+        '.assets[] | select(.name == $name) | .digest' "$TMP_DIR/starship.json")
+    [[ $starship_url == https://github.com/starship/starship/releases/download/* ]] || fail 'Starship 下载地址异常。'
+    [[ $starship_digest =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'Starship 缺少有效的 SHA256 发布摘要。'
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$starship_url" -o "$TMP_DIR/starship.tar.gz"
+    printf '%s  %s\n' "${starship_digest#sha256:}" "$TMP_DIR/starship.tar.gz" | sha256sum -c -
+    mkdir "$TMP_DIR/starship"
+    tar -xzf "$TMP_DIR/starship.tar.gz" -C "$TMP_DIR/starship" starship
+    [[ -f $TMP_DIR/starship/starship && ! -L $TMP_DIR/starship/starship ]] || fail 'Starship 包结构异常。'
+    [[ ! -e /usr/local/bin/starship && ! -L /usr/local/bin/starship ]] || fail 'Starship 安装路径已存在，拒绝覆盖。'
+    install -m 755 "$TMP_DIR/starship/starship" /usr/local/bin/starship
+fi
+starship --version
+cat > "$TMP_DIR/starship.toml" <<'STARSHIP_CONFIG'
+"$schema" = 'https://starship.rs/config-schema.json'
+
+format = """
+[](red)\
+$os\
+$username\
+$hostname\
+[](bg:peach fg:red)\
+$directory\
+[](bg:yellow fg:peach)\
+$git_branch\
+$git_status\
+[](fg:yellow bg:green)\
+$c\
+$rust\
+$golang\
+$nodejs\
+$bun\
+$php\
+$java\
+$kotlin\
+$haskell\
+$python\
+[](fg:green bg:sapphire)\
+$conda\
+[](fg:sapphire bg:lavender)\
+$time\
+[ ](fg:lavender)\
+$cmd_duration\
+$line_break\
+$character"""
+
+palette = 'catppuccin_mocha'
+
+[os]
+disabled = false
+style = "bg:red fg:crust"
+
+[os.symbols]
+Windows = ""
+Ubuntu = "󰕈"
+SUSE = ""
+Raspbian = "󰐿"
+Mint = "󰣭"
+Macos = "󰀵"
+Manjaro = ""
+Linux = "󰌽"
+Gentoo = "󰣨"
+Fedora = "󰣛"
+Alpine = ""
+Amazon = ""
+Android = ""
+AOSC = ""
+Arch = "󰣇"
+Artix = "󰣇"
+CentOS = ""
+Debian = "󰣚"
+Redhat = "󱄛"
+RedHatEnterprise = "󱄛"
+
+[username]
+show_always = true
+style_user = "bg:red fg:crust"
+style_root = "bg:red fg:crust"
+format = '[ $user]($style)'
+
+[directory]
+style = "bg:peach fg:crust"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Music" = "󰝚 "
+"Pictures" = " "
+"Developer" = "󰲋 "
+
+[git_branch]
+symbol = ""
+style = "bg:yellow"
+format = '[[ $symbol $branch ](fg:crust bg:yellow)]($style)'
+
+[git_status]
+style = "bg:yellow"
+format = '[[($all_status$ahead_behind )](fg:crust bg:yellow)]($style)'
+
+[nodejs]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[bun]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[c]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[rust]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[golang]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[php]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[java]
+symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[kotlin]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[haskell]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[python]
+symbol = ""
+style = "bg:green"
+format = '[[ $symbol( $version)(\(#$virtualenv\)) ](fg:crust bg:green)]($style)'
+
+[docker_context]
+symbol = ""
+style = "bg:sapphire"
+format = '[[ $symbol( $context) ](fg:crust bg:sapphire)]($style)'
+
+[conda]
+symbol = "  "
+style = "fg:crust bg:sapphire"
+format = '[$symbol$environment ]($style)'
+ignore_base = false
+
+[time]
+disabled = false
+time_format = "%R"
+style = "bg:lavender"
+format = '[[  $time ](fg:crust bg:lavender)]($style)'
+
+[line_break]
+disabled = true
+
+[character]
+disabled = false
+success_symbol = '[❯](bold fg:green)'
+error_symbol = '[❯](bold fg:red)'
+vimcmd_symbol = '[❮](bold fg:green)'
+vimcmd_replace_one_symbol = '[❮](bold fg:lavender)'
+vimcmd_replace_symbol = '[❮](bold fg:lavender)'
+vimcmd_visual_symbol = '[❮](bold fg:yellow)'
+
+[cmd_duration]
+show_milliseconds = true
+format = " in $duration "
+style = "bg:lavender"
+disabled = false
+show_notifications = false
+min_time_to_notify = 45000
+
+[palettes.catppuccin_mocha]
+rosewater = "#f5e0dc"
+flamingo = "#f2cdcd"
+pink = "#f5c2e7"
+mauve = "#cba6f7"
+red = "#f38ba8"
+maroon = "#eba0ac"
+peach = "#fab387"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+teal = "#94e2d5"
+sky = "#89dceb"
+sapphire = "#74c7ec"
+blue = "#89b4fa"
+lavender = "#b4befe"
+text = "#cdd6f4"
+subtext1 = "#bac2de"
+subtext0 = "#a6adc8"
+overlay2 = "#9399b2"
+overlay1 = "#7f849c"
+overlay0 = "#6c7086"
+surface2 = "#585b70"
+surface1 = "#45475a"
+surface0 = "#313244"
+base = "#1e1e2e"
+mantle = "#181825"
+crust = "#11111b"
+
+[palettes.catppuccin_frappe]
+rosewater = "#f2d5cf"
+flamingo = "#eebebe"
+pink = "#f4b8e4"
+mauve = "#ca9ee6"
+red = "#e78284"
+maroon = "#ea999c"
+peach = "#ef9f76"
+yellow = "#e5c890"
+green = "#a6d189"
+teal = "#81c8be"
+sky = "#99d1db"
+sapphire = "#85c1dc"
+blue = "#8caaee"
+lavender = "#babbf1"
+text = "#c6d0f5"
+subtext1 = "#b5bfe2"
+subtext0 = "#a5adce"
+overlay2 = "#949cbb"
+overlay1 = "#838ba7"
+overlay0 = "#737994"
+surface2 = "#626880"
+surface1 = "#51576d"
+surface0 = "#414559"
+base = "#303446"
+mantle = "#292c3c"
+crust = "#232634"
+
+[palettes.catppuccin_latte]
+rosewater = "#dc8a78"
+flamingo = "#dd7878"
+pink = "#ea76cb"
+mauve = "#8839ef"
+red = "#d20f39"
+maroon = "#e64553"
+peach = "#fe640b"
+yellow = "#df8e1d"
+green = "#40a02b"
+teal = "#179299"
+sky = "#04a5e5"
+sapphire = "#209fb5"
+blue = "#1e66f5"
+lavender = "#7287fd"
+text = "#4c4f69"
+subtext1 = "#5c5f77"
+subtext0 = "#6c6f85"
+overlay2 = "#7c7f93"
+overlay1 = "#8c8fa1"
+overlay0 = "#9ca0b0"
+surface2 = "#acb0be"
+surface1 = "#bcc0cc"
+surface0 = "#ccd0da"
+base = "#eff1f5"
+mantle = "#e6e9ef"
+crust = "#dce0e8"
+
+[palettes.catppuccin_macchiato]
+rosewater = "#f4dbd6"
+flamingo = "#f0c6c6"
+pink = "#f5bde6"
+mauve = "#c6a0f6"
+red = "#ed8796"
+maroon = "#ee99a0"
+peach = "#f5a97f"
+yellow = "#eed49f"
+green = "#a6da95"
+teal = "#8bd5ca"
+sky = "#91d7e3"
+sapphire = "#7dc4e4"
+blue = "#8aadf4"
+lavender = "#b7bdf8"
+text = "#cad3f5"
+subtext1 = "#b8c0e0"
+subtext0 = "#a5adcb"
+overlay2 = "#939ab7"
+overlay1 = "#8087a2"
+overlay0 = "#6e738d"
+surface2 = "#5b6078"
+surface1 = "#494d64"
+surface0 = "#363a4f"
+base = "#24273a"
+mantle = "#1e2030"
+crust = "#181926"
+
+# SSH 会话显示主机名，便于区分服务器。
+[hostname]
+ssh_only = true
+style = "bg:red fg:crust"
+format = '[@$hostname ]($style)'
+STARSHIP_CONFIG
+cat > "$TMP_DIR/starship.fish" <<'STARSHIP_FISH'
+# 仅在交互会话中加载提示符，保留服务器原有环境配置。
+if status is-interactive; and command -q starship
+    starship init fish | source
+end
+STARSHIP_FISH
+fish --no-config --no-execute "$TMP_DIR/starship.fish"
+install_user_config "$TMP_DIR/starship.toml" starship.toml
+install_user_config "$TMP_DIR/starship.fish" fish/conf.d/starship.fish
 fish_path=$(command -v fish)
 [[ -x $fish_path ]] || fail 'Fish 安装失败。'
 grep -Fxq "$fish_path" /etc/shells || printf '%s\n' "$fish_path" >> /etc/shells
