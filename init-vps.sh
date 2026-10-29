@@ -145,7 +145,7 @@ elif ! command -v glow >/dev/null; then
     glow_url=$(jq -er --arg suffix "_${glow_arch}.deb" \
         '[.assets[] | select(.name | endswith($suffix)) | .browser_download_url] | if length == 1 then .[0] else error("Glow 发行资产不唯一或不存在") end' "$TMP_DIR/glow.json")
     [[ $glow_url == https://github.com/charmbracelet/glow/releases/download/* ]] || fail 'Glow 下载地址异常。'
-    curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$glow_url" -o "$TMP_DIR/glow.deb"
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 700 "$glow_url" -o "$TMP_DIR/glow.deb"
     apt-get -o DPkg::Lock::Timeout=120 install -y "$TMP_DIR/glow.deb"
 fi
 glow --version
@@ -165,7 +165,7 @@ elif ! command -v hx >/dev/null; then
     helix_url=$(jq -er --arg suffix "-$helix_arch-linux.tar.xz" \
         '[.assets[] | select(.name | endswith($suffix)) | .browser_download_url] | if length == 1 then .[0] else error("发行资产不唯一或不存在") end' "$TMP_DIR/helix.json")
     [[ $helix_url == https://github.com/helix-editor/helix/releases/download/* ]] || fail 'Helix 下载地址异常。'
-    curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$helix_url" -o "$TMP_DIR/helix.tar.xz"
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 700 "$helix_url" -o "$TMP_DIR/helix.tar.xz"
     mkdir "$TMP_DIR/helix"
     tar -xJf "$TMP_DIR/helix.tar.xz" -C "$TMP_DIR/helix" --strip-components=1
     [[ -x $TMP_DIR/helix/hx && -d $TMP_DIR/helix/runtime ]] || fail 'Helix 包结构异常。'
@@ -258,7 +258,7 @@ if ! command -v starship >/dev/null; then
         '.assets[] | select(.name == $name) | .digest' "$TMP_DIR/starship.json")
     [[ $starship_url == https://github.com/starship/starship/releases/download/* ]] || fail 'Starship 下载地址异常。'
     [[ $starship_digest =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'Starship 缺少有效的 SHA256 发布摘要。'
-    curl -fSL --retry 3 --connect-timeout 15 --max-time 600 "$starship_url" -o "$TMP_DIR/starship.tar.gz"
+    curl -fSL --retry 3 --connect-timeout 15 --max-time 700 "$starship_url" -o "$TMP_DIR/starship.tar.gz"
     printf '%s  %s\n' "${starship_digest#sha256:}" "$TMP_DIR/starship.tar.gz" | sha256sum -c -
     mkdir "$TMP_DIR/starship"
     tar -xzf "$TMP_DIR/starship.tar.gz" -C "$TMP_DIR/starship" starship
